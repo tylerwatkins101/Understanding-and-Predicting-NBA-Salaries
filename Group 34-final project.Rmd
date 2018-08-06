@@ -1,0 +1,734 @@
+---
+title: 'Understanding and Predicting NBA Player Salaries'
+author: "Rebeca J. Agosto Rosa (rja2); Tyler Watkins (tylerjw4); Ronald Xu (zhengxu); Neha Pandey (npand4)"
+date: "August 3, 2018"
+output:
+  html_document:
+    theme: flatly
+    toc: yes
+    fig_width: 10
+    fig_height: 5
+  pdf_document:
+    toc: yes
+---
+
+```{r, echo = FALSE}
+# clear enviroment
+rm(list = ls())
+```
+
+```{r setup, echo = FALSE, message = FALSE, warning = FALSE}
+options(scipen = 1, digits = 4, width = 80)
+library(knitr)
+opts_chunk$set(cache = TRUE, autodep = TRUE)
+```
+
+
+# Introduction
+
+The National Basketball Association (NBA) was founded in 1946 and is currently composed of 30 basketball teams. The association is popular in North America and around the globe and is considered to be the premier men's professional league in the world for this sport.
+
+The NBA is an industry worth billions of dollars, generating revenue from [broadcast rights, advertising, merchandising, among other sources](https://www.investopedia.com/articles/investing/070715/nbas-business-model.asp), and as of 2018, every team is worth at least [one billion USD](https://www.forbes.com/sites/kurtbadenhausen/2018/02/07/nba-team-values-2018-every-club-now-worth-at-least-1-billion/#52f076ed7155). 
+
+The main attraction, of course, are the players, most of which enjoy celebrity status. But what exactly predicts an NBA player's salary? Some players are clearly worth more than others. Is salary solely a virtue of player performance?
+
+As sports fans, we would like to analyze various factors affecting NBA player salaries, including:
+
+- Are physical attributes like age, height, and weight significant predictors of salary?
+- Which performance statistics matter the most in predicting player salaries?
+
+Ultimately, our goal is to build a model that predicts NBA player salaries accurately.
+
+We focus on current NBA players, attempting to predict their 2017 - 2018 season salaries based on their performance on the previous season, as well as their physical and demographic attributes. Our goal is to uncover interesting findings and stories based on the statistical R modeling concepts we have learned in class.
+ 
+### Description of the Dataset
+
+To answer these questions, we have assembled a dataset of NBA players' salaries, performance/game statistics, and physical attributes. The dataset was cleaned and formatted in R by our team, and results from the merging of 3 datasets found at [kaggle](https://www.kaggle.com/koki25ando/nba-salary-prediction/data). The three original datasets (`Seasons_Stats.csv`, `player_data.csv` and `NBA_season1718_salary.csv`) were originally scraped from https://www.basketball-reference.com/ by kaggle user Koki Ando [(Ando 2018)](https://www.kaggle.com/koki25ando/nba-salary-prediction/data). The information was collected by the NBA.
+
+The dataset (`nba_data.csv`) consists of $410$ observations, which represent current NBA players. For each player, the data includes a total of 44 variables:
+
+- salary for the **2017-18** (current) season;
+- statistical performance metrics from the **2016-17** (previous) season (e.g., points per game, rebounds per game, field goal percentage, assists per game, minutes played);
+- demographic information (e.g., player age, height, weight, and university attended);
+- and other information such as position played, current team, and number of years in the league.
+
+The key variables of interest are:
+
+**Response variable**: 
+
+- players' salary (numeric)
+
+**Predictors**:
+
+- Physical attributes:
+    - age
+    - height
+    - weight
+    - years played
+- Player performance
+    - position played (categorical)
+    - player efficiency rating
+    - points per game
+    - minutes played
+    - assists per game
+    - rebound per game
+    - player efficiency rating
+    - turnovers per game
+    - blocks per game
+    - steals per game
+
+
+# Methods
+
+We employ common `R` libraries for our data wrangling, data visualization and data analysis. In our analysis, we focus on the use of statistical methods learned in class, including: multiple linear regression with polynomials and interactions, residual diagnostics, model evaluation and selection, and prediction on unseen data.
+
+### Data Preparation
+
+As stated in the introduction, we merged three datasets  (`Seasons_Stats.csv`, `player_data.csv` and `NBA_season1718_salary.csv`) to create our project dataset, `nba_data.csv` (only the final dataset is included). 
+
+From `Seasons_Stats.csv`, we extracted the "per game" statistics for the 2016-2017 season, and then merged this subset with the salary data. We subsequently merged these with the player data.
+
+In addition to merging the data, we did the following:
+
+- Since the game and player data is from the previous season to the salaries data, we removed observations for players who retired. 
+
+- Some players also had multiple observations because they had switched teams after the start of the season (so they had separate observations for each team they had been a part of). In those cases, we removed the observations with the lowest salaries.
+
+- We modified the categorical variable `Positions`, which refers to a player's role in the game, by dropping the unused levels. 
+
+- We also created the variable `Years_Played` to indicate how long a player had been in the NBA. To do this, we subtracted the variable `Year_Start`, indicating the year a player began his NBA career, from the current year, $2018$. 
+
+**The code for the Data Preparation is included in the Appendix.**
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE}
+# load libraries
+
+library(broom)
+library(knitr)
+
+library(data.table)
+library(GGally)
+library(tidyverse)
+
+library(lmtest)
+library(car)
+library(faraway)
+library(MASS)
+
+library(boot)
+library(caret)
+
+library(ggplot2)
+
+library(leaps)
+
+theme_update(plot.title = element_text(hjust = 0.5))
+```
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE}
+# read in data
+nba_data  = read_csv("nba_data.csv")
+nba_data = nba_data[-c(194), ] # removing only player with two positions
+# table(nba_data$Position)
+# nba_data$Position[194]
+# nba_data[194,]
+# str(nba_data)
+
+# split data into training and testing datasets
+set.seed(12345)
+trn_idx <- sample(nrow(nba_data), size = trunc(0.80 * nrow(nba_data)))
+nba_trn <- nba_data[trn_idx, ] # 328 obs.
+nba_tst <- nba_data[-trn_idx, ] # 82 obs.
+```
+
+```{r, metrics, echo = FALSE}
+# create metric functions
+get_bp_decision = function(model, alpha) {
+  decide = unname(bptest(model)$p.value < alpha)
+  ifelse(decide, "Reject", "Fail to Reject")
+}
+
+get_sw_decision = function(model, alpha) {
+  decide = unname(shapiro.test(resid(model))$p.value < alpha)
+  ifelse(decide, "Reject", "Fail to Reject")
+}
+
+get_num_params = function(model) {
+  length(coef(model))
+}
+
+get_loocv_rmse = function(model) {
+  sqrt(mean((resid(model) / (1 - hatvalues(model))) ^ 2))
+}
+
+get_adj_r2 = function(model) {
+  summary(model)$adj.r.squared
+}
+```
+
+### Exploratory Data Analysis
+
+We start off the analysis by visually exploring the correlation between the variables of interest. We use this information to help construct several starter models.
+
+```{r message = FALSE, warning = FALSE, echo = FALSE}
+# Look at the bi-variate exploration of our performance based predictor variables and Salary
+performance = subset(nba_data, select = c('Salary17_18', 'PPG', 'MPG', 'TOPG', 'RPG','PER', 'SPG', 'APG', 'BPG'))
+ggpairs(performance, title = 'Correlation and Scatter Plot Matrix - Salary & Performance Variables')
+```
+
+Observations:
+
+- In terms of the performance statistics, the player efficiency rating (`PER`) and points per game (`PPG`) seem to have a somewhat quadratic relationship with salary. `PPG` has the strongest correlation to salary, so the quadratic transformation might be very good to our model.
+- `MPG` also has a strong correlation to salary, so we can expect it to be another good predictor.
+- Blocks per game (`BPG`) and steals per game (`APG`) have the weakest linear relationships to salary.
+
+
+```{r message = FALSE, warning = FALSE, echo = FALSE}
+# Look at the bi-variate exploration of our demographic based predictor variables and Salary
+demographics = subset(nba_data, select = c('Salary17_18', 'Position', 'Age', 'Height', 'Weight','Years_Played'))
+ggpairs(demographics, title = 'Correlation and Scatter Plot Matrix - Salary & Demographic Variables')
+```
+
+Observations:
+
+- In terms of the demographic information, the number of years played (`Years_Played`) has a weak linear relationship with salary and therefore may contribute to our model. However, it appears that the other demographic variables are unlikely to play a significant role.
+
+
+### Starter Models
+
+After randomly splitting the data into test (20%) and training (80%) datasets, the first model fit using the training dataset is an additive model using all the predictors we deemed potentially relevant based on our knowledge of basketball. We then fit a model that performs two-way interactions among all predictors, and a quadratic model.
+
+Based on these models' estimates and our prior exploration of the correlations among the variables, we fit three additional models where we transform predictors more selectively:
+
+- a model where `PER` and `PPG` receive quadratic transformations (`start_model_4`);
+- a model where three predictors receive quadratic transformations, as well as two interactions (`start_model_5`);
+- and a model where all numeric predictors receive a quadratic transformation and all two-way interactions are included (`start_model_6`).
+
+
+```{r, starter models}
+# additive model
+start_model_1 = lm(Salary17_18 ~ PER + MPG + PPG + APG + RPG + TOPG + BPG + SPG + Position + Age + Height + Weight + Years_Played, data = nba_trn)
+# summary(start_model_1)
+
+# two-way interactions
+start_model_2 = lm(Salary17_18 ~ (PER + MPG + PPG + APG + RPG + TOPG + BPG + SPG + Position + Age + Height + Weight + Years_Played) ^ 2, data = nba_trn)
+# summary(start_model_2)
+
+# quadratic
+start_model_3 = lm(Salary17_18 ~ I(PER ^ 2) + I(MPG ^ 2) + I(PPG ^ 2) + I(APG ^ 2) + I(RPG ^ 2) + I(TOPG ^ 2) + I(BPG ^ 2) + I(SPG ^ 2) + Position + I(Age ^ 2) + I(Height ^ 2) + I(Weight ^ 2) + I(Years_Played ^ 2), data = nba_trn)
+# summary(start_model_3)
+
+# quadratic PPG & PER
+start_model_4 = lm(Salary17_18 ~ I(PER ^ 2) + MPG + I(PPG ^ 2) + APG + RPG + TOPG + BPG + SPG + Position + Age + Height + Weight + Years_Played, data = nba_trn)
+# summary(start_model_4)
+
+# some quadratic, some interactions
+start_model_5 = lm(Salary17_18 ~ I(MPG ^ 2) + I(PPG ^ 2) + APG + I(RPG ^ 2) + TOPG + + SPG + SPG + Position + Age + Height:Weight + Age:Years_Played, data = nba_trn)
+# summary(start_model_5)
+
+# all quadratic & all two-way interactions
+start_model_6 = lm(Salary17_18 ~ I(PER ^ 2) + I(MPG ^ 2) + I(PPG ^ 2) + I(APG ^ 2) + I(RPG ^ 2) + I(TOPG ^ 2) + I(BPG ^ 2) + I(SPG ^ 2) + Position + I(Age ^ 2) + I(Height ^ 2) + I(Weight ^ 2) + I(Years_Played ^ 2) + (PER + MPG + PPG + APG + RPG + TOPG + BPG + SPG + Position + Age + Height + Weight + Years_Played) ^ 2, data = nba_trn)
+# summary(start_model_6)
+```
+
+#### Performance Evaluation: Starter Models
+
+We use five metrics to compare the performance of the six starter models to get a baseline of performance: the Breusch-Pagan test for equal variance, the Shapiro-Wilk test for normality, the number of model parameters, the leave-one-out cross-validated (LOOCV) RMSE, and the adjusted $R^2$. Since we want to fail to reject the null on the B-P and S-W tests, we set the significance level low at $\alpha = 0.01$.
+
+```{r, starter model comparison, echo = FALSE, message=FALSE, warning=FALSE}
+results = data.frame(
+  BP = c(get_bp_decision(start_model_1, alpha = 0.01), get_bp_decision(start_model_2, alpha = 0.01), get_bp_decision(start_model_3, alpha = 0.01), get_bp_decision(start_model_4, alpha = 0.01), get_bp_decision(start_model_5, alpha = 0.01), get_bp_decision(start_model_6, alpha = 0.01)),
+  
+  SW = c(get_sw_decision(start_model_1, alpha = 0.01), get_sw_decision(start_model_2, alpha = 0.01), get_sw_decision(start_model_3, alpha = 0.01), get_sw_decision(start_model_4, alpha = 0.01), get_sw_decision(start_model_5, alpha = 0.01), get_sw_decision(start_model_6, alpha = 0.01)),
+  
+  Parameters = c(get_num_params(start_model_1), get_num_params(start_model_2), get_num_params(start_model_3), get_num_params(start_model_4), get_num_params(start_model_5), get_num_params(start_model_6)),
+  
+  RMSE = c(get_loocv_rmse(start_model_1), get_loocv_rmse(start_model_2), get_loocv_rmse(start_model_3), get_loocv_rmse(start_model_4), get_loocv_rmse(start_model_5), get_loocv_rmse(start_model_6)),
+  
+  R2 = c(get_adj_r2(start_model_1), get_adj_r2(start_model_2), get_adj_r2(start_model_3), get_adj_r2(start_model_4), get_adj_r2(start_model_5), get_adj_r2(start_model_6))
+)
+
+rownames(results) = c("Model 1", "Model 2", "Model 3", "Model 4", "Model 5", "Model 6")
+colnames(results) = c("Breusch-Pagan test*", "Shapiro-Wilk test*", "Num. parameters", "LOOCV-RMSE", "Adjusted R ^ 2")
+knitr::kable(results)
+```
+
+*$\alpha = 0.01$
+
+These models represent our performance baseline and we will improve upon them through the model selection process.
+
+### Model Selection
+
+In order to arrive at a final model we first had to determine which of the predictors included in our starter models were most relevant.To select our model parameters we performed both a backwards BIC search and backwards AIC search on all of our starter models. 
+
+We found that the performance of models found in the BIC search was better than that of the AIC search and for this reason we've included only the BIC backward search method here.
+
+**The code for AIC Selection is included in the Appendix.**
+
+The Bayesian Information Criterion "generally picks a smaller model than AIC" [(Dalpiaz 2018)](http://daviddalpiaz.github.io/appliedstats/variable-selection-and-model-building.html#selection-procedures), which we prefer for ease of interpretation and to prevent overfitting when predicting on unseen data. 
+
+
+#### BIC Backward Search
+
+We create a function to make applying the backward BIC method to multiple models more efficient.
+
+```{r, back.bic, message=FALSE, warning=FALSE}
+back_bic = function(model){
+  n = length(resid(model))
+  step(model, direction = "backward", k = log(n), trace = FALSE)
+}
+
+back_bic_1 = back_bic(start_model_1)
+back_bic_2 = back_bic(start_model_2)
+back_bic_3 = back_bic(start_model_3)
+back_bic_4 = back_bic(start_model_4)
+back_bic_5 = back_bic(start_model_5)
+back_bic_6 = back_bic(start_model_6)
+```
+
+
+#### BIC Selected Models
+
+These are the models selected through the backward BIC process.
+
+```{r, bic models, message=FALSE, warning=FALSE}
+bic_model_1 = lm(Salary17_18 ~ PPG + RPG + SPG + Years_Played, data = nba_trn)
+
+bic_model_2 = lm(Salary17_18 ~ PER + MPG + PPG + RPG + TOPG + SPG + 
+    Age + Height + Years_Played + PER:PPG + PER:RPG + MPG:PPG + 
+    MPG:Height + PPG:Height + PPG:Years_Played + TOPG:Age + TOPG:Years_Played + 
+    Age:Years_Played, data = nba_trn)
+
+bic_model_3 = lm(Salary17_18 ~ I(MPG^2) + I(PPG^2) + I(APG^2) + I(RPG^2) + 
+    I(TOPG^2) + I(Age^2), data = nba_trn)
+
+bic_model_4 = lm(Salary17_18 ~ I(PPG^2) + RPG + SPG + Years_Played, 
+    data = nba_trn)
+
+bic_model_5 = lm(Salary17_18 ~ I(MPG^2) + I(PPG^2) + I(RPG^2) + Age, 
+    data = nba_trn)
+
+bic_model_6 = lm(Salary17_18 ~ I(PPG^2) + PER + MPG + PPG + Age + 
+    Years_Played + PER:MPG + PER:PPG + PPG:Age + Age:Years_Played, 
+    data = nba_trn)
+```
+
+
+#### Performance Evaluation: BIC Selected Models
+
+As we did with the starter models, we use five metrics to compare the performance of the six models selected through the backward BIC search: the Breusch-Pagan test for equal variance, the Shapiro-Wilk test for normality, the number of model parameters, the leave-one-out cross-validated (LOOCV) RMSE, and the adjusted $R^2$. Since we want to fail to reject the null on the B-P and S-W tests, we set the significance level low at $\alpha = 0.01$.
+
+```{r, bic model comparison, echo = FALSE, message=FALSE, warning=FALSE}
+# create table with output from five metrics
+results = data.frame(
+  BP = c(get_bp_decision(bic_model_1, alpha = 0.01), get_bp_decision(bic_model_2, alpha = 0.01), get_bp_decision(bic_model_3, alpha = 0.01), get_bp_decision(bic_model_4, alpha = 0.01), get_bp_decision(bic_model_5, alpha = 0.01), get_bp_decision(bic_model_6, alpha = 0.01)),
+  
+  SW = c(get_sw_decision(bic_model_1, alpha = 0.01), get_sw_decision(bic_model_2, alpha = 0.01), get_sw_decision(bic_model_3, alpha = 0.01), get_sw_decision(bic_model_4, alpha = 0.01), get_sw_decision(bic_model_5, alpha = 0.01), get_sw_decision(bic_model_6, alpha = 0.01)),
+  
+  Parameters = c(get_num_params(bic_model_1), get_num_params(bic_model_2), get_num_params(bic_model_3), get_num_params(bic_model_4), get_num_params(bic_model_5), get_num_params(bic_model_6)),
+  
+  RMSE = c(get_loocv_rmse(bic_model_1), get_loocv_rmse(bic_model_2), get_loocv_rmse(bic_model_3), get_loocv_rmse(bic_model_4), get_loocv_rmse(bic_model_5), get_loocv_rmse(bic_model_6)),
+  
+  R2 = c(get_adj_r2(bic_model_1), get_adj_r2(bic_model_2), get_adj_r2(bic_model_3), get_adj_r2(bic_model_4), get_adj_r2(bic_model_5), get_adj_r2(bic_model_6))
+)
+
+rownames(results) = c("Model 1 (BIC)", "Model 2 (BIC)", "Model 3 (BIC)", "Model 4 (BIC)", "Model 5 (BIC)", "Model 6 (BIC)")
+colnames(results) = c("Breusch-Pagan test*", "Shapiro-Wilk test*", "Num. parameters", "LOOCV-RMSE", "Adjusted R ^ 2")
+knitr::kable(results)
+```
+
+*$\alpha = 0.01$
+
+Using backward BIC, we were unable to find a model that failed to reject the Breusch-Pagan test for equal variance and the Shapiro-Wilk test for normality. The number of parameters for all models is acceptable, so we rely on the LOOCV-RMSE and Adjusted $R^2$ metrics to choose the best model. This results in two top contenders: Model 2 (BIC) and Model 6 (BIC), which are closely matched on all metrics.
+
+However, we were slightly concerned that our models failed to reject the null in both the B-P and S-W tests. Thus, we proceeded to visually check the normality and equal variance assumptions of the two top models with Q-Q plots and fitted vs. residuals plots.
+
+```{r, bic models plots, echo = FALSE}
+# create function to produce fitted vs residuals plot
+plot_fitted_resid = function(model, pointcol = "gray", linecol = "darkorange") {
+  plot(fitted(model), resid(model), 
+       col = pointcol, pch = 20, cex = 1.5,
+       main = "Fitted vs. Residuals Plot",
+       xlab = "Fitted", ylab = "Residuals")
+  abline(h = 0, col = linecol, lwd = 2)
+}
+# create function to produce Q-Q plot
+plot_qq = function(model, pointcol = "gray", linecol = "darkorange") {
+  qqnorm(resid(model), col = pointcol, pch = 20, cex = 1.5)
+  qqline(resid(model), col = linecol, lwd = 2)
+}
+```
+
+#### Plot Diagnostics: Model 2 (BIC)
+
+```{r, echo = FALSE}
+par(mfrow = c(1,2))
+plot_fitted_resid(model = bic_model_2)
+plot_qq(model = bic_model_2)
+```
+
+#### Plot Diagnostics: Model 6 (BIC)
+
+```{r, echo = FALSE}
+par(mfrow = c(1,2))
+plot_fitted_resid(model = bic_model_6)
+plot_qq(model = bic_model_6)
+```
+
+Based on these plots, are the normality and equal variance assumptions suspect? Yes. The fitted vs. residuals plots for both models show the variance increasing, instead of being constant, and the Q-Q plots tails are fatter than we would expect from data generated from a normal distribution. Since the plots confirm the results of the formal tests, we are somewhat concerned. 
+
+The plots seem to suggest that more variable transformations would be required to improve the variance and normality of the errors. Thus, we were curious to see how the plots would look with a model that did fail to reject the null in the Breusch-Pagan and the Shapiro-Wilk tests with this data. 
+
+Fortunately, this was the case with two of the models we found using the backward AIC method, Model 2 (AIC) and Model 6 (AIC), which were based on the same starter models as the top two BIC models. We looked at these as a comparison, and believe that, while the Q-Q plots for the two AIC-selected models looked much better than the plots for our chosen BIC models, the improvement in the equal variance was less stark.
+
+In the end, we were willing to sacrifice the slightly better diagnostics of the AIC models for the BIC models which contained far less predictors and better performance in LOOCV-RMSE.
+
+**Note: The diagnostic plots for Model 2 (AIC) and Model 6 (AIC) are included in the Appendix.**
+
+
+# Results
+
+Here we compare our final two models, Model 2 (BIC) and Model 6 (BIC), based on performance summaries, train and test RMSE and $R^2$, fitted vs actual salaries on training data, and predicted vs actual salaries on unseen test data.
+
+Additionally, we had performed an ANOVA test. While the additional predictors in Model 2 (BIC) indicated a significant performance increase over Model 6 (BIC) based on the ANOVA comparison, we understood that the ANOVA comparison is solely based on fitted data. And since we are interested in prediciton, we rejected the conclusion from ANOVA and chose to use metrics like adjusted $R^2$ and LOOCV-RMSE and the plots below to help us compare our models in a more general sense.
+
+**The code for ANOVA is included in the Appendix.**
+
+
+### Model Performance Summary
+
+**Model 2 (BIC)**
+```{r, echo = FALSE}
+results4.1 = glance(bic_model_2)
+knitr::kable(results4.1)
+```
+
+**Model 6 (BIC)**
+```{r, echo = FALSE}
+results4.2 = glance(bic_model_6)
+knitr::kable(results4.2)
+```
+
+### Fitted vs. Actual Salaries (Training Data)
+
+```{r, echo = FALSE}
+par(mfrow = c(1, 2))
+plot(nba_trn$Salary17_18, predict(bic_model_2), col = "grey", pch = 20, cex = 1.5, xlim = c(0, 35000000), ylim = c(0, 35000000), main = "Fitted vs. Actual - Model 2", ylab = "Fitted Salaries", xlab = "Actual Salaries")
+abline(a=0, b=1, col = "darkorange", lwd = 2)
+
+plot(nba_trn$Salary17_18, predict(bic_model_6), col = "grey", pch = 20, cex = 1.5, xlim = c(0, 35000000), ylim = c(0, 35000000), main = "Fitted vs. Actual - Model 6", ylab = "Fitted Salaries", xlab = "Actual Salaries")
+abline(a=0, b=1, col = "darkorange", lwd = 2)
+```
+
+On the training data, both Model 2 (BIC) and Model 6 (BIC) fit the data quite well with $R^2$ scores of 0.7226 and 0.6952, respectively. However, both models slightly overpredict salaries at the lower end, and underpredict salaries at the higher end.
+
+### Predicted vs. Actual Salaries (Test Data)
+
+Here, we predict NBA player salary using the testing data and the models fit with the training data.
+
+```{r, echo = FALSE}
+salary_predictions_2 = predict(bic_model_2, newdata = nba_tst)
+salary_predictions_6 = predict(bic_model_6, newdata = nba_tst)
+```
+
+```{r, echo = FALSE}
+par(mfrow = c(1, 2))
+plot(nba_tst$Salary17_18, salary_predictions_2, col = "gray", pch = 20, cex = 1.5, xlim = c(0, 30000000), ylim = c(0, 30000000), main = "Predicted vs. Actual Salary - Model 2", ylab = "Salary Predictions", xlab = "Actual Salaries")
+abline(a=0, b=1, col = "darkorange", lwd = 2)
+
+plot(nba_tst$Salary17_18, salary_predictions_6, col = "gray", pch = 20, cex = 1.5, xlim = c(0, 30000000), ylim = c(0, 30000000), main = "Predicted vs. Actual Salary - Model 6", ylab = "Salary Predictions", xlab = "Actual Salaries")
+abline(a=0, b=1, col = "darkorange", lwd = 2)
+```
+
+Unsurprisingly, the predicted vs. actual salary plots show the models also slightly overpredict salaries at the lower end and underpredict salaries at the higher end on the testing data.
+
+#### RMSE and $R^2$ Performance on Train and Test Data
+
+```{r, echo = FALSE}
+results2 = data.frame(rmse_train = c(RMSE(fitted.values(bic_model_2), nba_trn$Salary17_18), RMSE(predict(bic_model_6), nba_trn$Salary17_18)), rmse_test = c(RMSE(salary_predictions_2, nba_tst$Salary17_18), RMSE(salary_predictions_6, nba_tst$Salary17_18)), r2_train = c(R2(fitted.values(bic_model_2), nba_trn$Salary17_18),  R2(predict(bic_model_6), nba_trn$Salary17_18)), r2_test = c(R2(salary_predictions_2, nba_tst$Salary17_18),R2(salary_predictions_6, nba_tst$Salary17_18)))
+
+rownames(results2) = c("Model 2 (BIC)", "Model 6 (BIC)")
+colnames(results2) = c("RMSE-train", "RMSE-test", "R ^ 2 train", "R ^ 2 test")
+knitr::kable(results2)
+```
+
+On the test data, both models predict similarly. However, Model 6 (BIC) degrades less in performance than Model 2 (BIC) for both RMSE and $R^2$ scores.
+
+### Chosen Model
+
+Our final model choice is **Model 6 (BIC)**. We chose Model 6 (BIC) as the best model for a number of reasons. First, Model 6 (BIC) performs almost as well on the training data as Model 2 (BIC) (as seen in the performance summary above), but with only 11 parameters, it is relatively easier to interpret. Second, and more importantly, Model 6 (BIC) performs better on the unseen test data, with a lower RMSE and higher $R^2$ than the other model, and hence is less likely to be overfitting the data.
+
+#### Model Residuals 
+```{r, echo = FALSE}
+par(mfrow = c(1,2))
+plot_fitted_resid(model = bic_model_6)
+plot(nba_trn$Salary17_18, predict(bic_model_6), col = "grey", pch = 20, cex = 1.5, xlim = c(0, 35000000), ylim = c(0, 35000000), main = "Fitted vs. Actual Plot", ylab = "Fitted Salaries", xlab = "Actual Salaries")
+abline(a=0, b=1, col = "darkorange", lwd = 2)
+```
+
+#### Model Parameters
+
+```{r echo=, message=FALSE, warning=FALSE, echo=FALSE}
+results3 = tidy(bic_model_6)
+colnames(results3) = c("Coefficients", "Estimate", "Standard Error", "Statistic", "P-Value")
+knitr::kable(results3)
+```
+
+# Discussion
+
+### Exploratory Data Analysis
+
+Since the primary goal of our model is prediction, not explanation, we were less concerned about correlation between our predictor variables. The scatter plot matrices were useful mainly to get a sense of the relationship between different potential predictors and the response, and the transformations that might be useful.
+
+We observed that certain performance variables like `PPG` and `MPG` were highly correlated with salary and later, when selecting a model, these assumptions were confirmed. Likewise, blocks per game (`BPG`) and steals per game (`APG`) were not useful predictors.
+
+There didn't appear to be a great deal of correlation between demographic data and salary. Therefore, it is not that surprising that predictors like height or weight were absent in the final model. As anyone who is not familiar with basketball could tell you, NBA players are tall. A certain height and, relatedly, weight could be "necessary" conditions to become a professional basketball player, but when you look solely at NBA players, where everyone is more or less at the same level, any variation in height or weight ceases to be important. Of course, we know height is related to the position one plays in the game (point guards tend to be shorter, and centres tend to be the tallest players.) But the lack of both `Height` and `Position` predictors in our final model suggests that salary is not a function of either of those.
+ 
+### First Models
+
+Our first models were chosen based on the exploratory analysis and our knowledge of basketball. With these models we established a baseline for performance which we then used to compare to all future models. Establishing a baseline of performance (either through industry norms, standard practice, or in our case knowlegde of basketball) is important when modelling. An established baseline keeps you on track with your future models and lets you know if what you're doing is improving or not. Our final model (and all of the BIC-selected models) improved on the corresponding starter model by substantially reducing the number of parameters and the LOOCVE-RMSE without sacrificing the adjusted $R^2$.
+
+### Model Selection Process
+
+After establishing our baseline performance we were able to choose only the most important parameters with a BIC backwards selection process.
+
+Ultimately, we saw that the largest starter models lead to the best models after both the backward BIC and AIC searches. As well, some of the transformations we thought might be useful when we started out were present in our chosen model, Model 6 (BIC), i.e. the quadratic `PPG` and the interaction between `Age:Years_Played`.
+
+In the end, Model 6 (BIC) was our top choice. It had far less parameters than Model 2 (BIC) and although Model 2 (BIC) performed better on the training data, it became obvious later on that the simpler Model 6 (BIC) fit unseen data better. Model 2 (BIC) had slightly overfit the data.
+
+**AIC vs BIC**
+
+As expected, the models returned by the AIC backward search were larger than those found using BIC. 
+
+These larger models had some advantages. One key advantage is that the they failed to reject the null in the Breusch-Pagan and Shapiro-Wilk tests more frequently. Among the AIC-selected models, we again saw that Model 2 and Model 6 were the best, and we failed to reject the equal variance and normality assumptions for both of them, unlike their BIC counterparts. 
+
+However, these models had over $70$ parameters, and while the AIC models performed slightly better than the BIC models on the adjusted $R^2$ metric, they performed worse on LOOCV-RMSE. This led us to believe that not only would these larger models be more difficult to interpret, but that they were also overfitting the data. Thus, overall, we preferred the simpler models found through the BIC method.
+
+
+### Selected Model Parameters
+
+Our final model was composed of a linear combination of 10 predictor variables. Those 10 predictors are composed of individual, interaction and quadratic terms of only 5 original predictor variables. They are:
+
+- Normal predictors: `PER`, `PPG`, `MPG`, `Age`, `Years_Played`
+- Quadratic predictors: `PPG^2`
+- Interaction predictors: `PER:MPG`, `PER:PPG`, `PPG:Age`, `Age:Years_Played`
+
+As expected based on the exploratory analysis, the quadratic transformation of `PPG` played a significant role in the model. Overall, of all the predictor variables, `PPG` (points per game) is the most important.
+
+The model interactions serve to further refine the predictions. However, with this many interactions it is quite difficult to interpret them all. 
+
+`Position`, our categorical variable, is absent from the top models. This implies that _where_ the player plays on the court is not nearly as important as _how_ he plays.
+
+The only physical attributes present in the final model were `Age` and the number of `Years_Played` in the NBA. It makes sense that both of these predictors, as well as their interactions with other variables, would help predict salary because salaries of professional athletes tend to increase over the first half of their career and then decrease as they age and their performance begins to deteriorate.
+ 
+
+### Usefulness of the Model: Predicting NBA Player Salaries
+
+Our selected model predicted reasonably well on unseen data. The test RMSE was $4,781,250 and the test $R^2 = 0.5238$. This means that we were able to explain 52.38% of the variance in unseen player salary with the predictor variables that we had available. 
+
+When looking at the actual versus predicted salaries we can see that we typically slightly overpredicted on lower salaries, and underpredicted on higher salaries. However, NBA player salaries are a complex variable to predict, and there are many factors that contribute to player salary that weren't represented in our data set. Overall, we believe our model does a reasonable job of predicting salary based on the data we have.
+
+In addition, an interesting implication from our model and results is that a large portion of a player's salary is indeed based on his most recent playing performance (plus age and years played), but that salary also largely depends on other factors.
+
+### What Missing Variables Could Improve Our Model?
+
+Besides recent performance, a player's salary also likely depends on his overall trajectory. Recall we are only looking at their performance in one season, but teams have much more information at their disposal when determining salary offers.
+
+In addition, other variables that could affect salaries are a player's "public image" and marketability, since the NBA and the individual teams generate part of their income from advertising and merchandising. Thus, teams might choose to reward players that attract sponsors, or that have a strong national fan base, and maybe penalize players that are caught in legal trouble (e.g. DUIs).
+
+It would also be interesting to look at whether player injuries affect their salary or not. 
+
+
+# Appendix
+
+### Data Preparation Code
+
+```{r, eval = FALSE }
+library(data.table)
+library(tidyverse)
+
+# read in data
+salary.table = read.csv("NBA_season1718_salary.csv")
+ss = read.csv("Seasons_Stats.csv")
+player_data = read.csv("player_data.csv")
+
+# get stats for 2017 only and make per game stats
+stats17 =
+  ss %>% filter(Year >= 2017) %>% 
+  select(Year:G, MP, PER, FG:PTS) %>% 
+  distinct(Player, .keep_all = TRUE) %>% 
+  mutate(MPG = MP/G, PPG = PTS/G, APG = AST/G, RPG = TRB/G, TOPG = TOV/G, BPG = BLK/G, SPG = STL/G)
+
+# merge salary and stats data
+stats_salary = merge(stats17, salary.table, by.x = "Player", by.y = "Player")
+names(stats_salary)[40] = "salary17_18"
+stats_salary = stats_salary[-39]
+
+#merge player data with salary and stats
+nba_data = merge(stats_salary, player_data, by.x = "Player", by.y = "name")
+
+# remove retired player name duplicates and duplicates with multiple salaries
+nba_data = nba_data[-c(141, 148, 152, 270, 308, 406,25,27,46, 47,91,92,99,100,113,125,134,146,156,165,166,180,183, 190,191,212,215,286,349,350,353,356,362,379,380,423,434), ]
+
+# keep wanted columns
+keeps =  c("Player", "Year", "Pos", "Age", "Tm.x", "G", "MP", "PER", "FG", "FGA","FG.", "X3P","X3PA","X3P.","X2P","X2PA", "X2P.", "eFG.", "FT", "FTA", "FT.", "ORB", "DRB", "TRB", "AST", "STL", "BLK", "TOV", "PF", "PTS", "MPG", "PPG", "APG", "RPG", "TOPG", "BPG", "SPG", "salary17_18", "year_start", "height", "weight", "birth_date", "college")
+
+nba_data = nba_data[,keeps]
+
+# rename columns
+nba_data = rename(nba_data,'Team'= "Tm.x")
+nba_data = rename(nba_data,'Position'= "Pos")
+nba_data = rename(nba_data,'Weight'= "weight")
+nba_data = rename(nba_data,'Height'= "height")
+nba_data = rename(nba_data,'Salary17_18'= "salary17_18")
+nba_data = rename(nba_data,'Birth_Date'= "birth_date")
+nba_data = rename(nba_data,'College'= "college")
+nba_data = rename(nba_data,'Year_Start'= "year_start")
+
+# drop unused position levels
+nba_data$Position = droplevels(nba_data$Position)
+
+# change year_start to years_experience
+nba_data$Years_Played = 2018 - nba_data$Year_Start
+
+# write to csv
+write.csv(nba_data, file = "nba_data.csv",row.names=FALSE)
+```
+
+### AIC Selection Code
+
+```{r, back.aic, message=FALSE, warning=FALSE}
+back_aic_1 <- step(start_model_1, direction = "backward", trace = FALSE)
+back_aic_2 <- step(start_model_2, direction = "backward", trace = FALSE)
+back_aic_3 <- step(start_model_3, direction = "backward", trace = FALSE)
+back_aic_4 <- step(start_model_4, direction = "backward", trace = FALSE)
+back_aic_5 <- step(start_model_5, direction = "backward", trace = FALSE)
+back_aic_6 <- step(start_model_6, direction = "backward", trace = FALSE)
+```
+
+```{r, aic models, message=FALSE, warning=FALSE}
+aic_model_1 <- lm(Salary17_18 ~ PPG + APG + RPG + TOPG + SPG + Weight + 
+    Years_Played, data = nba_trn)
+
+aic_model_2 <- lm(Salary17_18 ~ PER + MPG + PPG + APG + RPG + TOPG + 
+    BPG + SPG + Position + Age + Height + Weight + Years_Played + 
+    PER:MPG + PER:PPG + PER:APG + PER:RPG + PER:BPG + PER:SPG + 
+    PER:Age + MPG:SPG + MPG:Height + PPG:APG + PPG:TOPG + PPG:Position + 
+    PPG:Height + PPG:Years_Played + APG:SPG + APG:Position + 
+    APG:Height + APG:Years_Played + RPG:BPG + RPG:Height + TOPG:BPG + 
+    TOPG:Age + TOPG:Weight + TOPG:Years_Played + BPG:SPG + BPG:Position + 
+    BPG:Height + BPG:Weight + SPG:Position + SPG:Height + SPG:Weight + 
+    Position:Age + Position:Weight + Position:Years_Played + 
+    Age:Height + Age:Years_Played + Height:Weight + Height:Years_Played, 
+    data = nba_trn)
+
+aic_model_3 <- lm(Salary17_18 ~ I(MPG^2) + I(PPG^2) + I(APG^2) + I(RPG^2) + 
+    I(TOPG^2) + I(SPG^2) + I(Age^2) + I(Weight^2), data = nba_trn)
+
+aic_model_4 <- lm(Salary17_18 ~ MPG + I(PPG^2) + APG + RPG + TOPG + 
+    SPG + Years_Played, data = nba_trn)
+
+aic_model_5 <- lm(Salary17_18 ~ I(MPG^2) + I(PPG^2) + APG + I(RPG^2) + 
+    TOPG + SPG + Age + Height:Weight, data = nba_trn)
+
+aic_model_6 <- lm(Salary17_18 ~ I(MPG^2) + I(PPG^2) + I(BPG^2) + Position + 
+    PER + MPG + PPG + APG + RPG + TOPG + BPG + SPG + Age + Height + 
+    Weight + Years_Played + PER:APG + PER:RPG + PER:BPG + PER:SPG + 
+    MPG:PPG + MPG:APG + MPG:TOPG + MPG:SPG + Position:MPG + Position:PPG + 
+    PPG:Age + PPG:Height + APG:TOPG + APG:SPG + Position:APG + 
+    APG:Age + APG:Years_Played + RPG:Height + TOPG:BPG + TOPG:Age + 
+    TOPG:Height + TOPG:Years_Played + BPG:SPG + Position:BPG + 
+    BPG:Height + Position:SPG + SPG:Age + SPG:Height + SPG:Years_Played + 
+    Position:Weight + Age:Years_Played + Height:Weight + Height:Years_Played, 
+    data = nba_trn)
+```
+
+```{r, aic model comparison, echo = FALSE}
+results = data.frame(
+  BP = c(get_bp_decision(aic_model_1, alpha = 0.01), get_bp_decision(aic_model_2, alpha = 0.01), get_bp_decision(aic_model_3, alpha = 0.01), get_bp_decision(aic_model_4, alpha = 0.01), get_bp_decision(aic_model_5, alpha = 0.01), get_bp_decision(aic_model_6, alpha = 0.01)),
+  
+  SW = c(get_sw_decision(aic_model_1, alpha = 0.01), get_sw_decision(aic_model_2, alpha = 0.01), get_sw_decision(aic_model_3, alpha = 0.01), get_sw_decision(aic_model_4, alpha = 0.01), get_sw_decision(aic_model_5, alpha = 0.01), get_sw_decision(aic_model_6, alpha = 0.01)),
+  
+  Parameters = c(get_num_params(aic_model_1), get_num_params(aic_model_2), get_num_params(aic_model_3), get_num_params(aic_model_4), get_num_params(aic_model_5), get_num_params(aic_model_6)),
+  
+  RMSE = c(get_loocv_rmse(aic_model_1), get_loocv_rmse(aic_model_2), get_loocv_rmse(aic_model_3), get_loocv_rmse(aic_model_4), get_loocv_rmse(aic_model_5), get_loocv_rmse(aic_model_6)),
+  
+  R2 = c(get_adj_r2(aic_model_1), get_adj_r2(aic_model_2), get_adj_r2(aic_model_3), get_adj_r2(aic_model_4), get_adj_r2(aic_model_5), get_adj_r2(aic_model_6))
+)
+
+rownames(results) = c("Model 1 (AIC)", "Model 2 (AIC)", "Model 3 (AIC)", "Model 4 (AIC)", "Model 5 (AIC)", "Model 6 (AIC)")
+colnames(results) = c("Breusch-Pagan test*", "Shapiro-Wilk test*", "Num. parameters", "LOOCV-RMSE", "Adjusted R ^ 2")
+knitr::kable(results)
+```
+
+*$\alpha = 0.01$
+
+#### Plot Diagnostics: Model 2 (AIC)
+
+```{r, echo = FALSE}
+par(mfrow = c(1,2))
+plot_fitted_resid(model = aic_model_2)
+plot_qq(model = aic_model_2)
+```
+
+#### Plot Diagnostics: Model 6 (AIC)
+
+```{r, echo = FALSE}
+par(mfrow = c(1,2))
+plot_fitted_resid(model = aic_model_6)
+plot_qq(model = aic_model_6)
+```
+
+### ANOVA - Model 2 vs. Model 6 (BIC)
+
+While the additional predictors in Model 2 (BIC) have a highly significant effect on the model based on the ANOVA comparison, we understood that the ANOVA comparison is solely based on fitted data. Therefore, we rejected the conclusion from ANOVA and chose to use metrics like adjusted $R^2$ and LOOCV-RMSE to help us compare our models in a more general sense.
+
+```{r, echo = FALSE}
+# Use anova to compare 2 best models
+anova(bic_model_6, bic_model_2)
+```
+
+### Glossary
+
+    - Player - Player Name
+    - Year - Year of Season
+    - Position - Position Played
+    - Team - Team of Player
+    - G - Games, The number of games a player or team played where a specified criteria occured
+    - PER - PER: Player Efficiency Rating is the overall rating of a player's per-minute statistical production. The league average is 15.00 every season
+    - FG - Field Goal
+    - FGA - Field Goal Attempted
+    - FG. - Field Goal Percentage, this is calculated by the ratio of FG/FGA
+    - X3P - 3 Point Shots
+    - X3PA - 3 Point Shots Attempted
+    - X3P. - 3 Point Shot Percentage, this is calculated by X3P/X3PA
+    - X2P - 2 Point Shots
+    - X2PA - 2 Point Shots Attempted
+    - X2P. - 2 Point Shot Percentage, this is calculated by X2P/X2PA
+    - eFG. - Effective Field Goal Percentage, the formula is (FG + 0.5 * 3P) / FGA. This statistic adjusts for the fact that a 3-point field goal is worth one more point than a 2-point field goal. For example, suppose Player A goes 4 for 10 with 2 threes, while Player B goes 5 for 10 with 0 threes. Each player would have 10 points from field goals, and thus would have the same effective field goal percentage (50%)
+    - FT - Free Throws
+    - FTA - Free Throws Attempted
+    - FT. - Free Throw Percentage; the formula is FT / FTA
+    - ORB - Offensive Rebounds
+    - DRB - Defensive Rebounds
+    - TRB - Total Rebounds
+    - AST - Assists
+    - STL - Steals
+    - BLK - Blocks
+    - TOV - Turnovers
+    - PF - Personal Fouls
+    - PTS - Points
+    - MPG - Minutes Per Game
+    - PPG - Points Per Game
+    - APG - Assists Per Game
+    - RPG - Rebound Per Game
+    - TOPG - Turnovers Per Game
+    - BPG - Blocks Per Game
+    - SPG - Steals Per Game
+    - Salary17_18 - Salary Offered for the Season
+    - Year_Start - Year Player Started in the NBA
+    - Height - Height in cm
+    - Weight - Weight in lbs
+    - Birth_Date - date of birth (dd-mm-yy)
+    - College - College Graduated
+    - Years_Played - Years Played on the NBA
